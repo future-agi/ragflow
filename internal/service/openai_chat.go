@@ -290,6 +290,14 @@ func (s *OpenAIChatService) OpenAIChatCompletions(c *gin.Context, userID, chatID
 			_ = lfClient.Shutdown(shutdownCtx)
 		}()
 	}
+	if fiClient := FutureAGIClientFromTenant(ctx, dialog.TenantID); fiClient != nil {
+		ctx = context.WithValue(ctx, futureAGICtxKey, fiClient)
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			_ = fiClient.Shutdown(shutdownCtx)
+		}()
+	}
 
 	filteredMessages := s.filterMessages(openaiReq.Messages)
 

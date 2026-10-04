@@ -3351,6 +3351,7 @@ func (s *ChatPipelineService) decorateAnswer(
 			})
 		}
 	}
+	futureAGISpan(ctx, chat.ID, chat.TenantID, modelName, prompt, think+ans, usedTokenCount, tkNum, "")
 
 	return AsyncChatResult{
 		Answer:      think + ans,
