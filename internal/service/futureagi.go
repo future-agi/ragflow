@@ -260,7 +260,7 @@ func futureAGISpan(ctx context.Context, sessionID, tenantID, model, input, outpu
 		return
 	}
 	now := time.Now()
-	traceID := fmt.Sprintf("%016x%016x", uint64(now.UnixNano()), uint64(now.UnixNano()^0x9e3779b97f4a7c15))
+	traceID := fmt.Sprintf("%016x%016x", uint64(now.UnixNano()), uint64(now.UnixNano())^0x9e3779b97f4a7c15)
 	_ = client.PostSpan(ctx, FutureAGISpan{
 		TraceID:          traceID,
 		SessionID:        sessionID,
