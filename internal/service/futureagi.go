@@ -19,8 +19,9 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,8 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"gorm.io/gorm"
-
+	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
 )
@@ -40,25 +40,24 @@ type futureAGICtxKeyType struct{}
 
 var futureAGICtxKey = futureAGICtxKeyType{}
 
-// FutureAGIClientFromTenant returns a tracing client for the tenant, or nil
-// when Future AGI is not configured. A lookup failure is non-fatal: this is
+// FutureAGIClientFromTenant returns a tracing client for one chat request of
+// the tenant, or nil when Future AGI is not configured. chatID becomes the
+// session id, as it is for Langfuse. A lookup failure is non-fatal: this is
 // observability, not a chat requirement.
-func FutureAGIClientFromTenant(ctx context.Context, tenantID string) *FutureAGIClient {
+func FutureAGIClientFromTenant(ctx context.Context, tenantID, chatID string) *FutureAGIClient {
 	if tenantID == "" || dao.DB == nil {
 		return nil
 	}
 	var row entity.TenantFutureAGI
-	err := dao.DB.WithContext(ctx).Where("tenant_id = ?", tenantID).First(&row).Error
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
+	if err := dao.DB.WithContext(ctx).Where("tenant_id = ?", tenantID).First(&row).Error; err != nil {
 		return nil
 	}
 	if row.Endpoint == "" || row.APIKey == "" || row.SecretKey == "" || row.ProjectName == "" {
 		return nil
 	}
-	return NewFutureAGIClient(row.Endpoint, row.APIKey, row.SecretKey, row.ProjectName, row.Redact)
+	client := NewFutureAGIClient(row.Endpoint, row.APIKey, row.SecretKey, row.ProjectName, row.Redact)
+	client.ChatID = chatID
+	return client
 }
 
 // FutureAGISpan is one chat turn, mapped onto the attributes fi-collector
@@ -86,6 +85,7 @@ type FutureAGIClient struct {
 	SecretKey   string
 	ProjectName string
 	Redact      bool
+	ChatID      string
 	HTTP        *http.Client
 
 	events  chan []byte
@@ -253,17 +253,17 @@ func boolAttr(key string, value bool) map[string]any {
 }
 
 // futureAGISpan posts one chat span if the request context carries a client.
-// It never returns an error to the chat path.
-func futureAGISpan(ctx context.Context, sessionID, tenantID, model, input, output string, promptTokens, completionTokens int, chatErr string) {
+// The span starts when timer started and ends now. It never returns an error
+// to the chat path.
+func futureAGISpan(ctx context.Context, timer *common.Timer, tenantID, model, input, output string, promptTokens, completionTokens int, chatErr string) {
 	client, ok := ctx.Value(futureAGICtxKey).(*FutureAGIClient)
 	if !ok || client == nil {
 		return
 	}
-	now := time.Now()
-	traceID := fmt.Sprintf("%016x%016x", uint64(now.UnixNano()), uint64(now.UnixNano())^0x9e3779b97f4a7c15)
+	end := time.Now()
 	_ = client.PostSpan(ctx, FutureAGISpan{
-		TraceID:          traceID,
-		SessionID:        sessionID,
+		TraceID:          newFutureAGITraceID(),
+		SessionID:        client.ChatID,
 		TenantID:         tenantID,
 		Model:            model,
 		Input:            input,
@@ -271,7 +271,13 @@ func futureAGISpan(ctx context.Context, sessionID, tenantID, model, input, outpu
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		Error:            chatErr,
-		Start:            now,
-		End:              now,
+		Start:            end.Add(-timer.Total()),
+		End:              end,
 	})
+}
+
+func newFutureAGITraceID() string {
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+	return hex.EncodeToString(id[:])
 }

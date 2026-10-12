@@ -17,12 +17,19 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"ragflow/internal/common"
 )
 
 func TestFutureAGIPayloadSetsProjectAndUsage(t *testing.T) {
@@ -106,7 +113,7 @@ func TestFutureAGIPostsCollectorHeaders(t *testing.T) {
 	if recorded["key"] != "key" || recorded["secret"] != "secret" {
 		t.Fatalf("headers %#v", recorded)
 	}
-	if recorded["body"] == "" || !contains(recorded["body"], "project_name") {
+	if recorded["body"] == "" || !strings.Contains(recorded["body"], "project_name") {
 		t.Fatalf("body missing project_name: %s", recorded["body"])
 	}
 }
@@ -129,15 +136,114 @@ func hasAttr(attrs []map[string]any, key, value string) bool {
 	return false
 }
 
-func contains(body, needle string) bool {
-	return len(body) >= len(needle) && (body == needle || len(body) > 0 && (indexOf(body, needle) >= 0))
+// collector records every OTLP body posted to it.
+type collector struct {
+	mu     sync.Mutex
+	bodies []string
 }
 
-func indexOf(body, needle string) int {
-	for i := 0; i+len(needle) <= len(body); i++ {
-		if body[i:i+len(needle)] == needle {
-			return i
+func (c *collector) handler(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	c.mu.Lock()
+	c.bodies = append(c.bodies, string(body))
+	c.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
+func (c *collector) posted() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.bodies...)
+}
+
+// TestDecorateAnswerExportsFutureAGISpan pins the span the chat pipeline
+// sends: the chat id as session, the model, the prompt with its query, the
+// answer, and a start taken from the request timer.
+func TestDecorateAnswerExportsFutureAGISpan(t *testing.T) {
+	sink := &collector{}
+	server := httptest.NewServer(http.HandlerFunc(sink.handler))
+	defer server.Close()
+
+	client := NewFutureAGIClient(server.URL, "key", "secret", "proj", false)
+	client.ChatID = "chat-1"
+	ctx := context.WithValue(t.Context(), futureAGICtxKey, client)
+	timer := common.NewTimer()
+	timer.Start()
+	time.Sleep(20 * time.Millisecond)
+
+	s := &ChatPipelineService{}
+	s.decorateAnswer(ctx, "hello", map[string]interface{}{"chunks": []interface{}{}, "doc_aggs": []interface{}{}},
+		"system prompt", []string{"question"}, 7, timer, nil, 0, false, nil, "",
+		map[string]interface{}{"llm_name": "model-x"}, "tenant-1", nil, false)
+	if err := client.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	bodies := sink.posted()
+	if len(bodies) != 1 {
+		t.Fatalf("want one span, got %d", len(bodies))
+	}
+	span := decodeSpan(t, bodies[0])
+	attrs := spanAttrs(span)
+	for key, want := range map[string]string{
+		"session.id":     "chat-1",
+		"user.id":        "tenant-1",
+		"llm.model_name": "model-x",
+		"output.value":   "hello",
+	} {
+		if attrs[key] != want {
+			t.Errorf("%s = %q, want %q", key, attrs[key], want)
 		}
 	}
-	return -1
+	if !strings.Contains(attrs["input.value"], "system prompt") || !strings.Contains(attrs["input.value"], "### Query:\nquestion") {
+		t.Errorf("input.value = %q", attrs["input.value"])
+	}
+	start, _ := strconv.ParseInt(span["startTimeUnixNano"].(string), 10, 64)
+	end, _ := strconv.ParseInt(span["endTimeUnixNano"].(string), 10, 64)
+	if end-start < int64(20*time.Millisecond) {
+		t.Errorf("span lasts %v, want at least the 20ms the timer ran", time.Duration(end-start))
+	}
+}
+
+func TestFutureAGISpanCarriesTheChatError(t *testing.T) {
+	client := &FutureAGIClient{ProjectName: "proj"}
+	payload := client.payload(FutureAGISpan{TraceID: newFutureAGITraceID(), Error: "model timed out"})
+	body, _ := json.Marshal(payload)
+	status := decodeSpan(t, string(body))["status"].(map[string]any)
+	if status["code"] != float64(2) || status["message"] != "model timed out" {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestFutureAGITraceIDsAreRandom(t *testing.T) {
+	a, b := newFutureAGITraceID(), newFutureAGITraceID()
+	if len(a) != 32 || a == b {
+		t.Fatalf("trace ids %q and %q", a, b)
+	}
+}
+
+func decodeSpan(t *testing.T, body string) map[string]any {
+	t.Helper()
+	var payload struct {
+		ResourceSpans []struct {
+			ScopeSpans []struct {
+				Spans []map[string]any `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.ResourceSpans[0].ScopeSpans[0].Spans[0]
+}
+
+func spanAttrs(span map[string]any) map[string]string {
+	attrs := map[string]string{}
+	for _, raw := range span["attributes"].([]any) {
+		attr := raw.(map[string]any)
+		if value, ok := attr["value"].(map[string]any)["stringValue"].(string); ok {
+			attrs[attr["key"].(string)] = value
+		}
+	}
+	return attrs
 }

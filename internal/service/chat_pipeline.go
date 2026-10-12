@@ -1455,6 +1455,7 @@ func (s *ChatPipelineService) AsyncChat(
 				)
 			}
 			if driverErr != nil {
+				futureAGISpan(ctx, timer, chat.TenantID, llmModelName(llmModelConfig), prompt+queryBlock(questions), "", usedTokenCount, 0, driverErr.Error())
 				send(AsyncChatResult{
 					Answer: fmt.Sprintf("**ERROR**: %s", driverErr.Error()),
 					Final:  true,
@@ -1528,6 +1529,7 @@ func (s *ChatPipelineService) AsyncChat(
 			}
 
 			if err != nil {
+				futureAGISpan(ctx, timer, chat.TenantID, llmModelName(llmModelConfig), prompt+queryBlock(questions), "", usedTokenCount, 0, err.Error())
 				out <- AsyncChatResult{
 					Answer: fmt.Sprintf("**ERROR**: %s", err.Error()),
 					Final:  true,
@@ -3117,6 +3119,20 @@ func (e *embeddingModelEmbedder) Encode(ctx context.Context, texts []string) ([]
 	return vecs, nil
 }
 
+// queryBlock is the "### Query" block appended to the prompt in the answer's
+// timing stats. The Future AGI span input carries the same block.
+func queryBlock(questions []string) string {
+	return fmt.Sprintf("\n\n### Query:\n%s", strings.Join(questions, " "))
+}
+
+// llmModelName is the configured chat model name, or "" when it is unset.
+func llmModelName(llmModelConfig map[string]interface{}) string {
+	if name, ok := llmModelConfig["llm_name"].(string); ok {
+		return name
+	}
+	return ""
+}
+
 // decorateAnswer applies citation insertion, reference construction,
 // timing stats, token accounting, TTS, and Langfuse generation end to
 // the final answer.
@@ -3309,7 +3325,7 @@ func (s *ChatPipelineService) decorateAnswer(
 	totalMs := timer.Total().Seconds() * 1000
 	tkNum := graph.NumTokensFromString(think + ans)
 
-	prompt += fmt.Sprintf("\n\n### Query:\n%s", strings.Join(questions, " "))
+	prompt += queryBlock(questions)
 
 	timeStats := prompt + timer.Markdown() + "\n"
 	timeStats += fmt.Sprintf("  - Generated tokens(approximately): %d\n", tkNum)
@@ -3319,6 +3335,8 @@ func (s *ChatPipelineService) decorateAnswer(
 
 	// TTS synthesis for the final answer.
 	audioBinary := s.synthesizeTTS(ctx, ttsModel, think+ans)
+
+	modelName := llmModelName(llmModelConfig)
 
 	// Langfuse generation end observation.
 	if langfuseTraceID != "" {
@@ -3333,12 +3351,6 @@ func (s *ChatPipelineService) decorateAnswer(
 				CompletionTokens: tkNum,
 				TotalTokens:      usedTokenCount + tkNum,
 			}
-			modelName := ""
-			if llmModelConfig != nil {
-				if mn, ok := llmModelConfig["llm_name"].(string); ok {
-					modelName = mn
-				}
-			}
 			_ = lfClient.PostGeneration(ctx, LangfuseGeneration{
 				ID:        fmt.Sprintf("gen-%s", langfuseTraceID),
 				TraceID:   langfuseTraceID,
@@ -3351,7 +3363,7 @@ func (s *ChatPipelineService) decorateAnswer(
 			})
 		}
 	}
-	futureAGISpan(ctx, chat.ID, chat.TenantID, modelName, prompt, think+ans, usedTokenCount, tkNum, "")
+	futureAGISpan(ctx, timer, tenantID, modelName, prompt, think+ans, usedTokenCount, tkNum, "")
 
 	return AsyncChatResult{
 		Answer:      think + ans,
