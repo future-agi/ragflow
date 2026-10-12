@@ -195,7 +195,16 @@ func (c *FutureAGIClient) worker() {
 	for {
 		select {
 		case <-c.stop:
-			return
+			// The chat span is queued just before the request returns and
+			// calls Shutdown, so post what is queued instead of dropping it.
+			for {
+				select {
+				case body := <-c.events:
+					c.post(context.Background(), body)
+				default:
+					return
+				}
+			}
 		case body := <-c.events:
 			c.post(context.Background(), body)
 		}

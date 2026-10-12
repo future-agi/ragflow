@@ -156,6 +156,35 @@ func (c *collector) posted() []string {
 	return append([]string(nil), c.bodies...)
 }
 
+// TestFutureAGIShutdownPostsQueuedSpan pins that a span queued right before
+// the request calls Shutdown is still posted. Both channels are ready when the
+// worker starts, so without the drain select drops the span about half the time.
+func TestFutureAGIShutdownPostsQueuedSpan(t *testing.T) {
+	sink := &collector{}
+	server := httptest.NewServer(http.HandlerFunc(sink.handler))
+	defer server.Close()
+
+	for i := 0; i < 20; i++ {
+		client := &FutureAGIClient{
+			Endpoint:    server.URL,
+			ProjectName: "proj",
+			HTTP:        server.Client(),
+			events:      make(chan []byte, 1),
+			stop:        make(chan struct{}),
+			stopped:     make(chan struct{}),
+		}
+		if err := client.PostSpan(t.Context(), FutureAGISpan{TraceID: newFutureAGITraceID()}); err != nil {
+			t.Fatal(err)
+		}
+		client.once.Do(func() { close(client.stop) })
+		go client.worker()
+		<-client.stopped
+	}
+	if got := len(sink.posted()); got != 20 {
+		t.Fatalf("posted %d of 20 queued spans", got)
+	}
+}
+
 // TestDecorateAnswerExportsFutureAGISpan pins the span the chat pipeline
 // sends: the chat id as session, the model, the prompt with its query, the
 // answer, and a start taken from the request timer.
