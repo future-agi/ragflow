@@ -114,6 +114,12 @@ func (c *FutureAGIClient) enqueue(body []byte) {
 		return
 	}
 	select {
+	case <-c.stop:
+		c.noteDrop("exporter stopped")
+		return
+	default:
+	}
+	select {
 	case c.events <- body:
 	default:
 		c.noteDrop("export queue full")
@@ -278,9 +284,23 @@ func retireFutureAGIClient(c *FutureAGIClient) {
 	}()
 }
 
-// ShutdownFutureAGIClients posts queued traces of every tenant, bounded by ctx.
-// The API server calls it after the HTTP server stopped.
+// futureAGIInflight counts turns that started and have not finished yet, so
+// shutdown can wait for a turn whose pipeline is still closing its channel.
+var futureAGIInflight sync.WaitGroup
+
+// ShutdownFutureAGIClients waits for in-flight turns, then posts queued traces
+// of every tenant, all bounded by ctx. The API server calls it after the HTTP
+// server stopped.
 func ShutdownFutureAGIClients(ctx context.Context) {
+	idle := make(chan struct{})
+	go func() {
+		futureAGIInflight.Wait()
+		close(idle)
+	}()
+	select {
+	case <-idle:
+	case <-ctx.Done():
+	}
 	futureAGIClients.Lock()
 	clients := make([]*FutureAGIClient, 0, len(futureAGIClients.byTenant))
 	for tenantID, c := range futureAGIClients.byTenant {
@@ -335,6 +355,7 @@ type futureAGITurn struct {
 	tenantID  string
 	question  string
 	stream    bool
+	tracked   bool
 
 	mu       sync.Mutex
 	pipeline string
@@ -381,7 +402,9 @@ func startFutureAGITurn(ctx context.Context, chat *entity.Chat, messages []map[s
 		tenantID:  chat.TenantID,
 		question:  lastUserQuestion(messages),
 		stream:    stream,
+		tracked:   true,
 	}
+	futureAGIInflight.Add(1)
 	return context.WithValue(ctx, futureAGITurnKey, turn), turn
 }
 
@@ -396,9 +419,13 @@ func futureAGITurnFrom(ctx context.Context) *futureAGITurn {
 // observe forwards the pipeline's results unchanged and finishes the turn
 // when the pipeline closes its channel.
 func (t *futureAGITurn) observe(ctx context.Context, in <-chan AsyncChatResult, err error) (<-chan AsyncChatResult, error) {
-	if t == nil || err != nil || in == nil {
+	if t == nil {
+		return in, err
+	}
+	if err != nil || in == nil {
 		// A request the pipeline rejects up front (empty messages, last
 		// message not from the user) is not a chat turn: nothing is exported.
+		t.abandon()
 		return in, err
 	}
 	out := make(chan AsyncChatResult, cap(in))
@@ -475,12 +502,18 @@ func (t *futureAGITurn) retrieved(query string, kbinfos map[string]interface{}, 
 		}
 		prefix := fmt.Sprintf("retrieval.documents.%d.document.", i)
 		id := firstMapString(ck, "chunk_id", "id")
+		docID := firstMapString(ck, "doc_id")
+		if redact && firstMapString(ck, "url") != "" {
+			// Web-search chunk ids are built from the page URL; with redact
+			// on, export a stable hash instead of the URL.
+			id, docID = futureAGIHashID("web", id), ""
+		}
 		if id != "" {
 			attrs = append(attrs, stringAttr(prefix+"id", id))
 		}
 		meta := map[string]any{}
-		if v := firstMapString(ck, "doc_id"); v != "" {
-			meta["doc_id"] = v
+		if docID != "" {
+			meta["doc_id"] = docID
 		}
 		if v := firstMapString(ck, "kb_id"); v != "" {
 			meta["kb_id"] = v
@@ -640,6 +673,23 @@ func (t *futureAGITurn) closeLLMLocked(output string, promptTokens, completionTo
 	})
 }
 
+// abandon ends a turn without exporting it.
+func (t *futureAGITurn) abandon() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.done {
+		t.done = true
+		t.release()
+	}
+}
+
+func (t *futureAGITurn) release() {
+	if t.tracked {
+		t.tracked = false
+		futureAGIInflight.Done()
+	}
+}
+
 // finish closes the turn and queues its spans. complete is false when the
 // pipeline closed without a final result (the client went away).
 func (t *futureAGITurn) finish(answer, errText string, complete bool) {
@@ -669,6 +719,11 @@ func (t *futureAGITurn) finish(answer, errText string, complete bool) {
 	children := t.children
 	pipeline := t.pipeline
 	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		t.release()
+		t.mu.Unlock()
+	}()
 
 	if pipeline == "" {
 		pipeline = "other"
@@ -974,6 +1029,14 @@ func doubleAttr(key string, value float64) map[string]any {
 
 func boolAttr(key string, value bool) map[string]any {
 	return map[string]any{"key": key, "value": map[string]any{"boolValue": value}}
+}
+
+func futureAGIHashID(prefix, value string) string {
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return prefix + "-" + hex.EncodeToString(sum[:8])
 }
 
 func newFutureAGITraceID() string {

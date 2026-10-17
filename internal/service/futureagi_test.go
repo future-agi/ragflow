@@ -306,6 +306,9 @@ func TestFutureAGIRedactKeepsShapeAndDropsContent(t *testing.T) {
 	_, ok := decodeExport(t, bodies[0])
 	llm := attrMap(spanByName(t, ok, "ragflow.llm").Attributes)
 	rt := attrMap(spanByName(t, ok, "ragflow.retrieval").Attributes)
+	if id := rt["retrieval.documents.1.document.id"]; !strings.HasPrefix(id, "web-") || strings.Contains(id, "w1") {
+		t.Fatalf("web chunk id with redact on = %q", id)
+	}
 	if llm["llm.model_name"] != "gpt-x" || llm["llm.token_count.prompt"] != "120" || rt["retrieval.documents.0.document.id"] != "c1" || rt["retrieval.documents.0.document.score"] != "0.82" {
 		t.Fatalf("redact dropped ids, scores, model or tokens: llm=%v retrieval=%v", llm, rt)
 	}
@@ -494,10 +497,12 @@ func TestStartFutureAGITurnNeedsACompleteRow(t *testing.T) {
 	if turn == nil || futureAGITurnFrom(ctx) != turn {
 		t.Fatal("complete row must start a turn")
 	}
+	defer turn.abandon()
 	if turn.sessionID != "chat-1" || turn.question != "hi" {
 		t.Fatalf("session=%q question=%q", turn.sessionID, turn.question)
 	}
 	_, again := startFutureAGITurn(common.WithSessionID(t.Context(), "conv-9"), chat, msgs, false)
+	defer again.abandon()
 	if again.sessionID != "conv-9" {
 		t.Fatalf("conversation id not used as session: %q", again.sessionID)
 	}
@@ -506,6 +511,7 @@ func TestStartFutureAGITurnNeedsACompleteRow(t *testing.T) {
 	}
 	dao.DB.Model(&entity.TenantFutureAGI{}).Where("tenant_id = ?", "tenant-1").Update("project_name", "proj-2")
 	_, rotated := startFutureAGITurn(t.Context(), chat, msgs, false)
+	defer rotated.abandon()
 	if rotated.client == turn.client || rotated.client.ProjectName != "proj-2" {
 		t.Fatal("changed settings must build a new client")
 	}
@@ -717,5 +723,37 @@ func TestDefaultFutureAGIVerifier(t *testing.T) {
 	}
 	if err := (defaultFutureAGIVerifier{}).Verify(t.Context(), "http://127.0.0.1:1", "k", "s"); err == nil || errors.Is(err, ErrFutureAGIUnauthorized) {
 		t.Fatalf("down: %v", err)
+	}
+}
+
+// TestShutdownWaitsForInFlightTurns pins the server-stop order: a handler can
+// return on the final result while the pipeline is still closing its channel,
+// so the flush must wait for that turn instead of dropping it.
+func TestShutdownWaitsForInFlightTurns(t *testing.T) {
+	useFutureAGITestDB(t)
+	sink, srv := newFakeCollector(t, http.StatusOK)
+	dao.DB.Create(&entity.TenantFutureAGI{TenantID: "tenant-1", APIKey: "k", SecretKey: "s", Endpoint: srv.URL, ProjectName: "proj"})
+	chat := &entity.Chat{ID: "chat-1", TenantID: "tenant-1"}
+	msgs := []map[string]interface{}{{"role": "user", "content": "hi"}}
+
+	_, rejected := startFutureAGITurn(t.Context(), chat, msgs, false)
+	if out, err := rejected.observe(t.Context(), nil, errors.New("rejected")); out != nil || err == nil {
+		t.Fatal("rejected request must pass the error through")
+	}
+
+	_, turn := startFutureAGITurn(t.Context(), chat, msgs, false)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		turn.finish("late answer", "", true)
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	ShutdownFutureAGIClients(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("shutdown timed out: a turn was never released")
+	}
+	body := sink.wait(t, 1)[0]
+	if !strings.Contains(body, "late answer") {
+		t.Fatalf("late turn not exported: %s", body)
 	}
 }
