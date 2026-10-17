@@ -857,6 +857,11 @@ func runAdmin(ctx context.Context, serverName string, args *serverArgs) error {
 		common.Fatal("Server forced to shutdown", zap.Error(err))
 	}
 
+	// Post chat traces still queued for Future AGI, bounded.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	service.ShutdownFutureAGIClients(flushCtx)
+	flushCancel()
+
 	common.Info("Admin HTTP server exited")
 	return nil
 }
