@@ -1727,7 +1727,7 @@ func (s *ChatPipelineService) AsyncChatSolo(
 			chatMessages = append(chatMessages, modelMessageFromMap(m))
 		}
 
-		futureAGITurnFrom(ctx).llmStart(target.ModelName, target.ProviderName, chatMessages)
+		futureAGITurnFrom(ctx).llmStart(llmModelName(llmModelConfig), llmFactoryName(llmModelConfig), chatMessages)
 
 		// 7. Drive the LLM: stream (per-delta with think markers) or non-stream (one-shot).
 		if stream {
