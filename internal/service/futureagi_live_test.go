@@ -224,7 +224,7 @@ func TestFutureAGILive(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/chats_openai/"+webChat+"/chat/completions", strings.NewReader(string(body)))
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/openai/"+webChat+"/chat/completions", strings.NewReader(string(body)))
 	NewOpenAIChatService().OpenAIChatCompletions(c, tenantID, webChat, body)
 	t.Logf("openai-compatible status=%d bytes=%d", rec.Code, rec.Body.Len())
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "**ERROR**") {
