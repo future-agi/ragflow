@@ -18,13 +18,19 @@ import message from '@/components/ui/message';
 import { ResponseGetType } from '@/interfaces/database/base';
 import { IToken } from '@/interfaces/database/chat';
 import { ITenantInfo } from '@/interfaces/database/dataset';
-import { ILangfuseConfig } from '@/interfaces/database/system';
+import {
+  IFutureAGIConfig,
+  ILangfuseConfig,
+} from '@/interfaces/database/system';
 import {
   ITenant,
   ITenantUser,
   IUserInfo,
 } from '@/interfaces/database/user-setting';
-import { ISetLangfuseConfigRequestBody } from '@/interfaces/request/system';
+import {
+  ISetFutureAGIConfigRequestBody,
+  ISetLangfuseConfigRequestBody,
+} from '@/interfaces/request/system';
 import { DEFAULT_LANGUAGE_CODE, supportedLanguages } from '@/locales/config';
 import kbService from '@/services/knowledge-service';
 import userService, {
@@ -54,6 +60,9 @@ export const enum UserSettingApiAction {
   AgreeTenant = 'agreeTenant',
   SetLangfuseConfig = 'setLangfuseConfig',
   DeleteLangfuseConfig = 'deleteLangfuseConfig',
+  SetFutureAGIConfig = 'setFutureAGIConfig',
+  DeleteFutureAGIConfig = 'deleteFutureAGIConfig',
+  FetchFutureAGIConfig = 'fetchFutureAGIConfig',
   ListPipelines = 'listPipelines',
   FetchLangfuseConfig = 'fetchLangfuseConfig',
 }
@@ -491,6 +500,64 @@ export const useFetchLangfuseConfig = () => {
     gcTime: 0,
     queryFn: async () => {
       const { data } = await userService.getLangfuseConfig();
+
+      return data?.data;
+    },
+  });
+
+  return { data, loading };
+};
+
+export const useSetFutureAGIConfig = () => {
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.SetFutureAGIConfig],
+    mutationFn: async (params: ISetFutureAGIConfigRequestBody) => {
+      const { data } = await userService.setFutureAGIConfig(params);
+      if (data.code === 0) {
+        message.success(t('message.operated'));
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, setFutureAGIConfig: mutateAsync };
+};
+
+export const useDeleteFutureAGIConfig = () => {
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.DeleteFutureAGIConfig],
+    mutationFn: async () => {
+      const { data } = await userService.deleteFutureAGIConfig();
+      if (data.code === 0) {
+        if (data.data) {
+          message.success(t('message.deleted'));
+        } else {
+          message.warning(t('message.noFutureAGIConfigToDelete'));
+        }
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, deleteFutureAGIConfig: mutateAsync };
+};
+
+export const useFetchFutureAGIConfig = () => {
+  const { data, isFetching: loading } = useQuery<IFutureAGIConfig>({
+    queryKey: [UserSettingApiAction.FetchFutureAGIConfig],
+    gcTime: 0,
+    queryFn: async () => {
+      const { data } = await userService.getFutureAGIConfig();
 
       return data?.data;
     },

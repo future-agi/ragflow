@@ -31,6 +31,7 @@ const {
   createSystemToken,
   getSystemConfig,
   setLangfuseConfig,
+  setFutureAGIConfig,
 } = api;
 
 const methods = {
@@ -88,6 +89,18 @@ const methods = {
   },
   deleteLangfuseConfig: {
     url: setLangfuseConfig,
+    method: 'delete',
+  },
+  setFutureAGIConfig: {
+    url: setFutureAGIConfig,
+    method: 'put',
+  },
+  getFutureAGIConfig: {
+    url: setFutureAGIConfig,
+    method: 'get',
+  },
+  deleteFutureAGIConfig: {
+    url: setFutureAGIConfig,
     method: 'delete',
   },
 } as const;
