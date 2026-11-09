@@ -1,3 +1,8 @@
+# Pin the toolchain and model assets together; mutable latest tags can replace
+# native libraries underneath the versions required by this source tree.
+FROM infiniflow/github_action_runner@sha256:064ee3030975941a468757c81edef6853ed85c638b0faa6b198df2249247a8ea AS build-toolchain
+FROM infiniflow/ragflow_deps@sha256:89a97c2786eea30a8ee72ac6a21ba33118e76d8e35c6dcf85e09761a0b743ca5 AS build-assets
+
 # base stage
 FROM ubuntu:24.04 AS base
 USER root
@@ -17,7 +22,7 @@ WORKDIR /ragflow
 # exclude them from the tar extract and symlink them to layout.onnx instead,
 # saving ~219MB in the image.
 RUN mkdir -p /ragflow/internal/rag/res/deepdoc /root/.ragflow
-RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/huggingface.co,target=/huggingface.co \
+RUN --mount=type=bind,from=build-assets,source=/huggingface.co,target=/huggingface.co \
     tar --exclude='.*' \
         --exclude='layout.laws.onnx' \
         --exclude='layout.manual.onnx' \
@@ -45,7 +50,7 @@ RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/huggingface.co
 # silently returned 0. localBpeLoader resolves it from <workdir>/ragflow_deps/,
 # so dropping it here makes the table load offline at startup (see
 # InitCL100KEncoder fail-fast guard).
-RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/cl100k_base.tiktoken,target=/tmp/cl100k_base.tiktoken \
+RUN --mount=type=bind,from=build-assets,source=/cl100k_base.tiktoken,target=/tmp/cl100k_base.tiktoken \
     mkdir -p /ragflow/ragflow_deps && \
     cp /tmp/cl100k_base.tiktoken /ragflow/ragflow_deps/cl100k_base.tiktoken
 
@@ -55,7 +60,7 @@ RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/cl100k_base.ti
 # missing asset FAILS THE BUILD here rather than shipping an image where every tagged
 # model silently counts with the calibrated cl100k estimate. The tokenizer.json files
 # that exist only as cross-check oracles are deliberately not shipped.
-RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/huggingface.co,target=/huggingface.co \
+RUN --mount=type=bind,from=build-assets,source=/huggingface.co,target=/huggingface.co \
     for asset in \
         BAAI/bge-m3/sentencepiece.bpe.model \
         BAAI/bge-large-en-v1.5/vocab.txt \
@@ -136,7 +141,7 @@ RUN --mount=type=cache,id=ragflow_apt,target=/var/cache/apt,sharing=locked \
 
 # ── web-builder stage ──
 
-FROM infiniflow/github_action_runner:latest AS web-builder
+FROM build-toolchain AS web-builder
 USER root
 
 WORKDIR /ragflow
@@ -164,10 +169,17 @@ RUN --mount=type=bind,source=.git,target=/ragflow/.git \
 
 
 # ── go-builder stage ──
-FROM infiniflow/github_action_runner:latest AS go-builder
+FROM build-toolchain AS go-builder
 USER root
 SHELL ["/bin/bash", "-c"]
 WORKDIR /ragflow
+
+# A comma only falls back on HTTP 404/410. A pipe also handles EOF, timeouts
+# and server errors. Keep checksum verification enabled and allow an override.
+ARG GOPROXY="https://proxy.golang.org|https://goproxy.cn|direct"
+ENV GOPROXY=${GOPROXY} \
+    GOMODCACHE=/root/.cache/gomod \
+    GOCACHE=/root/.cache/gobuild
 
 # Cache Go modules BEFORE copying source (mirrors the Dockerfile_ci fix):
 # copy only the manifests, download the full module graph into a persistent
@@ -177,8 +189,6 @@ WORKDIR /ragflow
 COPY go.mod go.sum ./
 RUN --mount=type=cache,id=ragflow_gomod,target=/root/.cache/gomod \
     --mount=type=cache,id=ragflow_gobuild,target=/root/.cache/gobuild \
-    GOMODCACHE=/root/.cache/gomod GOCACHE=/root/.cache/gobuild \
-    GOPROXY=${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct} \
     go mod download
 
 COPY internal internal
@@ -219,7 +229,6 @@ RUN git config --global safe.directory "*" && \
 
 RUN --mount=type=cache,id=ragflow_gomod,target=/root/.cache/gomod \
     --mount=type=cache,id=ragflow_gobuild,target=/root/.cache/gobuild \
-    GOMODCACHE=/root/.cache/gomod GOCACHE=/root/.cache/gobuild \
     git config --global safe.directory "*" && \
     ./build.sh --go
 

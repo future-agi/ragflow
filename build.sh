@@ -367,8 +367,10 @@ check_office_oxide_deps() {
         local found_version
         found_version=$(strings "$lib_path" 2>/dev/null | grep -E "^0\.[0-9]+\.[0-9]+$" | head -1)
         echo -e "${YELLOW}office_oxide native lib version mismatch (required v${OFFICE_OXIDE_VERSION}; found: ${found_version:-unknown}); refreshing from download${NC}"
-        rm -rf "${OFFICE_OXIDE_PREFIX}" "${PROJECT_ROOT}/office_oxide-linux-x86_64.tar.gz"
-        if ! (cd "${PROJECT_ROOT}" && uv run python3 ragflow_deps/download_deps.py); then
+        rm -rf "${OFFICE_OXIDE_PREFIX}" "${PROJECT_ROOT}/ragflow_deps/office_oxide-linux-x86_64.tar.gz"
+        # Run the script itself so uv installs its PEP 723 dependencies. Running
+        # `uv run python3 script.py` skips that metadata in a clean builder.
+        if ! (cd "${PROJECT_ROOT}" && uv run --script ragflow_deps/download_deps.py); then
             echo -e "${RED}Error: office_oxide native lib version mismatch${NC}"
             echo "  Required: v${OFFICE_OXIDE_VERSION}; found: ${found_version:-unknown}"
             echo "  A stale lib silently loses PPT97 (.ppt) slide content. Refresh:"
