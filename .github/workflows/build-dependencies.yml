@@ -1,0 +1,27 @@
+name: Build dependency regression checks
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - build.sh
+      - test/build_dependencies.sh
+      - test/build_pdf_oxide_version.sh
+      - .github/workflows/build-dependencies.yml
+  push:
+    branches:
+      - feat/th-8233-futureagi-export
+
+permissions:
+  contents: read
+
+jobs:
+  build-dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check native dependency recovery and Docker acquisition contract
+        run: bash test/build_dependencies.sh
+      - name: Check native version rejection cases
+        run: bash test/build_pdf_oxide_version.sh
